@@ -211,7 +211,15 @@
                 const main = DOM.get('main-content');
                 main.innerHTML = `
                     <section class="page" id="page-dashboard"></section>
-                    <section class="page" id="page-biblia"><div class="search-bar"><input type="search" id="bibleSearch" placeholder="Buscar versículo..."></div><div id="bibleResults"></div></section>
+                    <section class="page" id="page-biblia">
+                        <div class="search-bar"><input type="search" id="bibleSearch" placeholder="Buscar em toda a Bíblia..."></div>
+                        <div style="display:flex;gap:8px;margin-bottom:12px;">
+                            <select id="bibleBookSelect" style="flex:2;"></select>
+                            <select id="bibleChapterSelect" style="flex:1;"></select>
+                        </div>
+                        <div id="bibleResults"></div>
+                        <p style="font-size:0.65rem;color:var(--text-muted);text-align:center;margin-top:16px;">Texto: Bíblia Livre (BLIVRE) — CC BY 3.0 BR</p>
+                    </section>
                     <section class="page" id="page-estudos"><div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;"><button class="btn sm primary" id="btnNewStudy">+ Novo</button><button class="btn sm outline filter-btn" data-filter="">Todos</button><button class="btn sm outline filter-btn" data-filter="Doutrina">Doutrina</button><button class="btn sm outline filter-btn" data-filter="Aplicação">Aplicação</button></div><div id="estudosList"></div></section>
                     <section class="page" id="page-devocional"><div id="devocionalContent"></div></section>
                     <section class="page" id="page-diario"><button class="btn sm primary" id="btnNewDiary" style="margin-bottom:14px;">+ Nova Anotação</button><div id="diarioList"></div></section>
@@ -280,18 +288,79 @@
                 return streak;
             }
 
-            const sampleVerses = [
-                { ref:'Salmos 23:1', text:'O Senhor é o meu pastor; nada me faltará.' },
-                { ref:'Provérbios 3:5-6', text:'Confia no Senhor de todo o teu coração...' },
-                { ref:'Mateus 11:28', text:'Vinde a mim, todos os que estais cansados...' },
-                { ref:'Romanos 8:28', text:'Sabemos que todas as coisas cooperam para o bem...' },
-                { ref:'Filipenses 4:13', text:'Tudo posso naquele que me fortalece.' }
-            ];
-            function loadBible() {
-                const q = (DOM.get('bibleSearch')?.value || '').toLowerCase();
-                const results = q ? sampleVerses.filter(v => v.ref.toLowerCase().includes(q) || v.text.toLowerCase().includes(q)) : sampleVerses;
+            let BIBLE = null; // carregado sob demanda a partir de biblialivre.json (~4,3MB)
+            async function loadBibleData() {
+                if (BIBLE) return BIBLE;
+                const res = await fetch('./biblialivre.json');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const raw = await res.json();
+                // o item 0 do array é metadado/créditos do arquivo, não um livro — filtramos por 'capitulos'
+                const books = raw.filter(b => b && b.nome && Array.isArray(b.capitulos));
+                BIBLE = { books };
+                return BIBLE;
+            }
+            function populateBookSelect() {
+                const sel = DOM.get('bibleBookSelect');
+                sel.innerHTML = BIBLE.books.map((b, i) => `<option value="${i}">${sanitize(b.nome)}</option>`).join('');
+            }
+            function populateChapterSelect(bookIndex, selected = 1) {
+                const book = BIBLE.books[bookIndex];
+                const sel = DOM.get('bibleChapterSelect');
+                sel.innerHTML = book.capitulos.map((_, i) => `<option value="${i+1}" ${i+1===selected?'selected':''}>Cap. ${i+1}</option>`).join('');
+            }
+            function renderChapterReader() {
+                const bookIdx = Number(DOM.get('bibleBookSelect').value || 0);
+                const chapNum = Number(DOM.get('bibleChapterSelect').value || 1);
+                const book = BIBLE.books[bookIdx];
+                if (!book) return;
+                const verses = book.capitulos[chapNum - 1] || [];
                 const container = DOM.get('bibleResults');
-                if (container) container.innerHTML = results.map(v => `<div class="card"><div class="card-header"><div class="card-icon">📖</div><div class="card-title">${sanitize(v.ref)}</div></div><div class="card-body">${sanitize(v.text)}</div><button class="btn sm outline" onclick="addFavorite('${sanitize(v.ref)}','${sanitize(v.text)}','versiculo')">⭐ Favoritar</button></div>`).join('') || '<div class="empty-state">Nenhum versículo.</div>';
+                container.innerHTML = `<div class="card"><div class="card-header"><div class="card-icon">📖</div><div class="card-title">${sanitize(book.nome)} ${chapNum}</div></div>` +
+                    verses.map((text, i) => `<p style="margin-bottom:10px;line-height:1.7;"><strong style="color:var(--gold);">${i+1}</strong> ${sanitize(text)} <button class="btn sm outline fav-verse" data-ref="${sanitize(book.nome)} ${chapNum}:${i+1}" data-text="${sanitize(text)}" style="padding:2px 8px;font-size:0.65rem;vertical-align:middle;">⭐</button></p>`).join('') +
+                    `</div>`;
+                DB.put('config', { key: 'lastReading', bookIdx, chapNum }).catch(() => {});
+            }
+            function searchBible(q) {
+                const results = [];
+                for (const book of BIBLE.books) {
+                    for (let ci = 0; ci < book.capitulos.length; ci++) {
+                        const verses = book.capitulos[ci];
+                        for (let vi = 0; vi < verses.length; vi++) {
+                            if (verses[vi].toLowerCase().includes(q)) results.push({ book: book.nome, chap: ci + 1, verse: vi + 1, text: verses[vi] });
+                        }
+                    }
+                }
+                return results;
+            }
+            function renderSearchResults(q) {
+                const results = searchBible(q);
+                const container = DOM.get('bibleResults');
+                if (!results.length) { container.innerHTML = '<div class="empty-state">Nenhum versículo encontrado.</div>'; return; }
+                const shown = results.slice(0, 100);
+                container.innerHTML = `<p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px;">${results.length} resultado(s)${results.length > 100 ? ' — mostrando os 100 primeiros' : ''}</p>` +
+                    shown.map(r => `<div class="card"><div class="card-header"><div class="card-icon">📖</div><div class="card-title">${sanitize(r.book)} ${r.chap}:${r.verse}</div></div><div class="card-body">${sanitize(r.text)}</div><button class="btn sm outline fav-verse" data-ref="${sanitize(r.book)} ${r.chap}:${r.verse}" data-text="${sanitize(r.text)}">⭐ Favoritar</button></div>`).join('');
+            }
+            let bibleSearchDebounce;
+            async function loadBible() {
+                const container = DOM.get('bibleResults');
+                if (!container) return;
+                if (!BIBLE) {
+                    container.innerHTML = '<div class="empty-state">Carregando a Bíblia (só na primeira vez)...</div>';
+                    try {
+                        await loadBibleData();
+                        populateBookSelect();
+                        const last = await DB.get('config', 'lastReading').catch(() => null);
+                        const bookIdx = last?.bookIdx ?? 0, chapNum = last?.chapNum ?? 1;
+                        DOM.get('bibleBookSelect').value = bookIdx;
+                        populateChapterSelect(bookIdx, chapNum);
+                    } catch (e) {
+                        logger.error('Erro ao carregar a Bíblia:', e);
+                        container.innerHTML = '<div class="empty-state">Não foi possível carregar a Bíblia. Verifique sua conexão e tente novamente.</div>';
+                        return;
+                    }
+                }
+                const q = (DOM.get('bibleSearch')?.value || '').trim().toLowerCase();
+                if (q) renderSearchResults(q); else renderChapterReader();
             }
 
             async function loadEstudos(filter = '') {
@@ -524,7 +593,6 @@
                 estudos.forEach(e => { if (JSON.stringify(e).toLowerCase().includes(q)) found.push({ type:'Estudo', title: e.titulo }); });
                 notas.forEach(n => { if (JSON.stringify(n).toLowerCase().includes(q)) found.push({ type:'Anotação', title: n.titulo }); });
                 bib.forEach(b => { if (JSON.stringify(b).toLowerCase().includes(q)) found.push({ type:'Link', title: b.titulo }); });
-                sampleVerses.forEach(v => { if (v.ref.toLowerCase().includes(q) || v.text.toLowerCase().includes(q)) found.push({ type:'Versículo', title: v.ref }); });
                 res.innerHTML = found.length ? found.slice(0,20).map(f => `<div class="card" style="padding:10px;margin-bottom:6px;"><span class="tag gold">${sanitize(f.type)}</span> ${sanitize(f.title)}</div>`).join('') : '<p style="text-align:center;color:var(--text-muted);">Nada encontrado.</p>';
             }
 
@@ -540,7 +608,24 @@
                 DOM.get('modalOverlay').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
                 DOM.get('searchModalOverlay').addEventListener('click', e => { if (e.target === e.currentTarget) closeSearchModal(); });
                 document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); closeSearchModal(); } if (e.ctrlKey && e.key === 'k') { e.preventDefault(); openSearchModal(); } });
-                DOM.get('bibleSearch')?.addEventListener('input', loadBible);
+                DOM.get('bibleSearch')?.addEventListener('input', (e) => {
+                    clearTimeout(bibleSearchDebounce);
+                    bibleSearchDebounce = setTimeout(() => loadBible(), 250);
+                });
+                DOM.get('bibleBookSelect')?.addEventListener('change', () => {
+                    if (DOM.get('bibleSearch')) DOM.get('bibleSearch').value = '';
+                    const bookIdx = Number(DOM.get('bibleBookSelect').value);
+                    populateChapterSelect(bookIdx, 1);
+                    renderChapterReader();
+                });
+                DOM.get('bibleChapterSelect')?.addEventListener('change', () => {
+                    if (DOM.get('bibleSearch')) DOM.get('bibleSearch').value = '';
+                    renderChapterReader();
+                });
+                document.addEventListener('click', (e) => {
+                    const favBtn = e.target.closest('.fav-verse');
+                    if (favBtn) { addFavorite(favBtn.dataset.ref, favBtn.dataset.text, 'versiculo').then(() => showToast('Favoritado!')).catch(() => showToast('Erro ao favoritar.')); }
+                });
                 document.addEventListener('click', (e) => {
                     if (e.target.id === 'btnNewStudy') openStudyModal();
                     if (e.target.id === 'btnNewDiary') openDiaryModal();
